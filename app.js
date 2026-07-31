@@ -43,6 +43,7 @@ const UI_TEXT = {
     definition: "Definition",
     hoverMap: "Hover over the map or ranking to connect county geography with the ordered values.",
     exploreByYear: "Explore by year",
+    mapBreakdown: "Map breakdown",
     rank: "Rank",
     value: "Value",
     topThird: "Top third",
@@ -133,6 +134,7 @@ const UI_TEXT = {
     definition: "Definición",
     hoverMap: "Pase el cursor sobre el mapa o la clasificación para conectar la geografía del condado con los valores ordenados.",
     exploreByYear: "Explorar por año",
+    mapBreakdown: "Desglose del mapa",
     rank: "Rango",
     value: "Valor",
     topThird: "Tercio superior",
@@ -389,6 +391,7 @@ let currentCounty = "Douglas";
 let activeView = "start";
 let currentLanguage = "en";
 let suppressHistory = false;
+let currentBreakdown = {};
 
 const $ = (id) => document.getElementById(id);
 
@@ -405,8 +408,8 @@ function measureLabel(m) {
 }
 
 function definitionText(m, concise = false) {
-  if (currentLanguage === "es") return DEFINITION_ES[m.key] || conciseDefinition(m.definition);
-  return concise ? conciseDefinition(m.definition) : m.definition;
+  if (currentLanguage === "es") return cleanDefinitionText(DEFINITION_ES[m.key] || conciseDefinition(m.definition));
+  return cleanDefinitionText(concise ? conciseDefinition(m.definition) : m.definition);
 }
 
 function sourceText(source) {
@@ -443,6 +446,17 @@ function measure(key) {
 
 function stripOxfordComma(text) {
   return String(text ?? "").replace(/, (and|or)\b/g, " $1");
+}
+
+function cleanDefinitionText(text) {
+  return String(text ?? "")
+    .replace(/\s*\((?:right|left|above|below)\)/gi, "")
+    .replace(/\s+and the maps? to the right\b/gi, "")
+    .replace(/\s+and the (?:chart|graph|table|figure)s? (?:to the )?(?:right|left|above|below)\b/gi, "")
+    .replace(/\b(?:maps?|charts?|graphs?|tables?|figures?) (?:to the )?(?:right|left|above|below)\b/gi, (match) => match.split(/\s+/)[0])
+    .replace(/\b(?:shown|displayed|listed) (?:to the )?(?:right|left|above|below)\b/gi, "shown")
+    .replace(/\s{2,}/g, " ")
+    .trim();
 }
 
 function format(value, m) {
@@ -499,6 +513,66 @@ function latestAvailable(m) {
 function valueFor(mKey, when, geo) {
   const m = DATA.measures[mKey] || DATA.profileOnlyMeasures?.[mKey];
   return m?.values?.[when]?.[geo] ?? null;
+}
+
+function isBreakdownMeasure(mKey) {
+  return mKey === "race_ethnicity" || mKey === "population_pyramid";
+}
+
+function breakdownOptions(mKey) {
+  if (mKey === "race_ethnicity") {
+    return [
+      ["White", "White"],
+      ["Latino", "Hispanic/Latino"],
+      ["AIAN", "American Indian/Alaska Native"],
+      ["Asian", "Asian"],
+      ["Black", "Black/African American"],
+      ["NHPI", "Native Hawaiian/Pacific Islander"],
+      ["Other", "Some other race"],
+      ["Multiracial", "Two or more races"],
+    ].map(([key, label]) => ({ key, label: raceLabel(label) }));
+  }
+  if (mKey === "population_pyramid") {
+    return [
+      "0-4",
+      "5-9",
+      "10-14",
+      "15-19",
+      "20-24",
+      "25-29",
+      "30-34",
+      "35-39",
+      "40-44",
+      "45-49",
+      "50-54",
+      "55-59",
+      "60-64",
+      "65-69",
+      "70-74",
+      "75-79",
+      "80-84",
+      "85+",
+    ].map((age) => ({ key: age, label: `${currentLanguage === "es" ? "Edad" : "Age"} ${age}` }));
+  }
+  return [];
+}
+
+function breakdownKey(mKey) {
+  const options = breakdownOptions(mKey);
+  const existing = currentBreakdown[mKey];
+  return options.some((option) => option.key === existing) ? existing : options[0]?.key;
+}
+
+function breakdownLabel(mKey, key = breakdownKey(mKey)) {
+  return breakdownOptions(mKey).find((option) => option.key === key)?.label || key || "";
+}
+
+function breakdownValueFor(mKey, when, geo, key = breakdownKey(mKey)) {
+  const value = valueFor(mKey, when, geo);
+  if (!value || typeof value !== "object") return scalar(value);
+  if (mKey === "race_ethnicity") return Number(value[key]) || 0;
+  if (mKey === "population_pyramid") return (Number(value[`Female ${key}`]) || 0) + (Number(value[`Male ${key}`]) || 0);
+  return null;
 }
 
 function countyNames() {
@@ -672,16 +746,16 @@ function updateRouteControls() {
   document.querySelector("#routeForm .action-button").disabled = !currentMeasure;
 }
 
-function rankedRows(mKey, when) {
+function rankedRows(mKey, when, componentKey = null) {
   const m = measure(mKey);
   return countyNames()
-    .map((county) => ({ county, value: scalar(valueFor(mKey, when, county)) }))
+    .map((county) => ({ county, value: isBreakdownMeasure(mKey) ? breakdownValueFor(mKey, when, county, componentKey) : scalar(valueFor(mKey, when, county)) }))
     .filter((row) => row.value !== null)
     .sort((a, b) => b.value - a.value);
 }
 
-function tertileClass(mKey, when, county) {
-  const rows = rankedRows(mKey, when);
+function tertileClass(mKey, when, county, componentKey = null) {
+  const rows = rankedRows(mKey, when, componentKey);
   const index = rows.findIndex((row) => row.county === county);
   if (index < 0) return "missing";
   const third = Math.ceil(rows.length / 3);
@@ -690,7 +764,7 @@ function tertileClass(mKey, when, county) {
   return "bottom";
 }
 
-function mapSvg({ target, mKey, when, labels = false, profile = false }) {
+function mapSvg({ target, mKey, when, labels = false, profile = false, componentKey = null }) {
   const m = measure(mKey);
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", "0 0 820 620");
@@ -701,12 +775,13 @@ function mapSvg({ target, mKey, when, labels = false, profile = false }) {
     const info = DATA.counties[county];
     const group = document.createElementNS("http://www.w3.org/2000/svg", "g");
     group.dataset.county = county;
-    group.classList.add("county", profile ? "profile-fill" : tertileClass(mKey, when, county));
+    group.classList.add("county", profile ? "profile-fill" : tertileClass(mKey, when, county, componentKey));
     if (county === currentCounty) group.classList.add("selected");
     const path = document.createElementNS("http://www.w3.org/2000/svg", "path");
     path.setAttribute("d", info.path);
     const title = document.createElementNS("http://www.w3.org/2000/svg", "title");
-    title.textContent = profile ? county : `${county}: ${format(valueFor(mKey, when, county), m)}`;
+    const mapValue = isBreakdownMeasure(mKey) ? breakdownValueFor(mKey, when, county, componentKey) : valueFor(mKey, when, county);
+    title.textContent = profile ? county : `${county}: ${format(mapValue, m)}`;
     group.append(path, title);
     if (labels || profile) {
       const text = document.createElementNS("http://www.w3.org/2000/svg", "text");
@@ -720,7 +795,7 @@ function mapSvg({ target, mKey, when, labels = false, profile = false }) {
     group.addEventListener("mouseleave", clearHover);
     group.addEventListener("click", () => {
       if (profile) openCountyProfile(county);
-      else openCountyMeasure(county, mKey, when);
+      else openCountyMeasure(county, mKey, when, componentKey);
     });
     svg.appendChild(group);
   });
@@ -865,7 +940,9 @@ function hoverCounty(county, event) {
   document.querySelectorAll(`[data-county="${county}"]`).forEach((el) => el.classList.add("hovered"));
   const m = measure(currentMeasure);
   const tooltip = $("tooltip");
-  tooltip.innerHTML = `<strong>${county}</strong><span>${format(valueFor(currentMeasure, currentWhen, county), m)}</span>`;
+  const componentKey = isBreakdownMeasure(currentMeasure) ? breakdownKey(currentMeasure) : null;
+  const value = componentKey ? breakdownValueFor(currentMeasure, currentWhen, county, componentKey) : valueFor(currentMeasure, currentWhen, county);
+  tooltip.innerHTML = `<strong>${county}</strong><span>${format(value, m)}</span>`;
   tooltip.style.left = `${event.clientX + 14}px`;
   tooltip.style.top = `${event.clientY + 14}px`;
   tooltip.classList.add("visible");
@@ -880,15 +957,17 @@ function renderMeasurePage(mKey = currentMeasure, when = currentWhen) {
   currentMeasure = mKey;
   currentWhen = when;
   const m = measure(mKey);
+  const componentKey = isBreakdownMeasure(mKey) ? breakdownKey(mKey) : null;
+  if (componentKey) currentBreakdown[mKey] = componentKey;
   $("measureSubject").textContent = subjectLabel(m.subject);
   $("measureTitle").textContent = measureLabel(m);
   $("measureDefinition").innerHTML = `<strong>${esc(t("definition"))}:</strong> ${esc(stripOxfordComma(definitionText(m, true)))}`;
-  $("measureDescription").textContent = t("hoverMap");
+  $("measureDescription").textContent = componentKey ? `${t("hoverMap")} ${breakdownLabel(mKey, componentKey)}.` : t("hoverMap");
   $("measureSource").textContent = sourceText(m.source);
-  $("rankUnit").textContent = unitLabel(m);
+  $("rankUnit").textContent = componentKey ? breakdownLabel(mKey, componentKey) : unitLabel(m);
   renderTimeControl(mKey, when);
-  mapSvg({ target: $("measureMap"), mKey, when });
-  renderRank(mKey, when);
+  mapSvg({ target: $("measureMap"), mKey, when, componentKey });
+  renderRank(mKey, when, componentKey);
   renderChildcareAgePanel(mKey);
   setView("measure");
   pushState({ view: "measure", measure: mKey, when });
@@ -897,24 +976,42 @@ function renderMeasurePage(mKey = currentMeasure, when = currentWhen) {
 function renderTimeControl(mKey, when) {
   const m = measure(mKey);
   const enabled = m.available.filter((item) => !item.disabled);
-  if (enabled.length <= 1) {
+  const breakdown = breakdownOptions(mKey);
+  if (enabled.length <= 1 && !breakdown.length) {
     $("measureTimeControl").innerHTML = "";
     $("measureTimeControl").classList.remove("time-control");
     return;
   }
   $("measureTimeControl").classList.add("time-control");
-  $("measureTimeControl").innerHTML = `
+  const breakdownSelect = breakdown.length ? `
+    <label for="measureBreakdownSelect">${esc(t("mapBreakdown"))}</label>
+    <select id="measureBreakdownSelect">
+      ${breakdown.map((item) => `<option value="${esc(item.key)}" ${item.key === breakdownKey(mKey) ? "selected" : ""}>${esc(item.label)}</option>`).join("")}
+    </select>
+  ` : "";
+  const yearSelect = enabled.length > 1 ? `
     <label>${esc(t("exploreByYear"))}</label>
     <div class="time-dots">${enabled.map((item) => `<button class="${item.label === when ? "active" : ""}" data-when="${item.label}" type="button">${item.label}</button>`).join("")}</div>
+  ` : "";
+  $("measureTimeControl").innerHTML = `
+    ${breakdownSelect}
+    ${yearSelect}
   `;
+  const select = $("measureBreakdownSelect");
+  if (select) {
+    select.addEventListener("change", () => {
+      currentBreakdown[mKey] = select.value;
+      renderMeasurePage(mKey, when);
+    });
+  }
   $("measureTimeControl").querySelectorAll("[data-when]").forEach((button) => {
     button.addEventListener("click", () => renderMeasurePage(mKey, button.dataset.when));
   });
 }
 
-function renderRank(mKey, when) {
+function renderRank(mKey, when, componentKey = null) {
   const m = measure(mKey);
-  const rows = rankedRows(mKey, when);
+  const rows = rankedRows(mKey, when, componentKey);
   $("rankList").innerHTML = "";
   rows.forEach((row, index) => {
     const div = document.createElement("button");
@@ -924,11 +1021,11 @@ function renderRank(mKey, when) {
     div.innerHTML = `<span>${index + 1}</span><span>${row.county}</span><span>${format(row.value, m)}</span>`;
     div.addEventListener("mouseenter", (event) => hoverCounty(row.county, event));
     div.addEventListener("mouseleave", clearHover);
-    div.addEventListener("click", () => openCountyMeasure(row.county, mKey, when));
+    div.addEventListener("click", () => openCountyMeasure(row.county, mKey, when, componentKey));
     $("rankList").appendChild(div);
   });
   STATE_REFS.forEach((geo) => {
-    const value = scalar(valueFor(mKey, when, geo));
+    const value = isBreakdownMeasure(mKey) ? breakdownValueFor(mKey, when, geo, componentKey) : scalar(valueFor(mKey, when, geo));
     if (value === null) return;
     const div = document.createElement("div");
     div.className = "rank-row reference";
@@ -937,23 +1034,25 @@ function renderRank(mKey, when) {
   });
 }
 
-function openCountyMeasure(county, mKey, when) {
+function openCountyMeasure(county, mKey, when, componentKey = null) {
   currentCounty = county;
   currentMeasure = mKey;
   currentWhen = when;
   const m = measure(mKey);
+  if (isBreakdownMeasure(mKey)) currentBreakdown[mKey] = componentKey || breakdownKey(mKey);
+  const selectedBreakdown = isBreakdownMeasure(mKey) ? breakdownKey(mKey) : null;
   $("countyMeasureSubject").textContent = subjectLabel(m.subject);
   $("countyMeasureTitle").textContent = `${countyTitle(county)}: ${measureLabel(m)}`;
   $("countyMeasureDefinition").textContent = stripOxfordComma(definitionText(m));
   $("countyMeasureSource").textContent = sourceText(m.source);
   $("trendTitle").textContent = `${measureLabel(m)} ${t("byYear")}`;
   renderCountyVisualization(county, mKey, when);
-  $("countyStateMapTitle").textContent = `${measureLabel(m)} ${t("acrossOregon")}`;
-  mapSvg({ target: $("countyStateMap"), mKey, when });
+  $("countyStateMapTitle").textContent = selectedBreakdown ? `${breakdownLabel(mKey, selectedBreakdown)} ${t("acrossOregon")}` : `${measureLabel(m)} ${t("acrossOregon")}`;
+  renderCountyStateMap(county, mKey, when, selectedBreakdown);
   const countyValue = valueFor(mKey, when, county);
   const hasGraphicValue = countyValue && typeof countyValue === "object";
   $("countyContext").innerHTML = `
-    ${hasGraphicValue ? "" : `<h3>${format(countyValue, m)}</h3>`}
+    ${hasGraphicValue ? `<h3>${format(breakdownValueFor(mKey, when, county, selectedBreakdown), m)}</h3><p>${esc(breakdownLabel(mKey, selectedBreakdown))}</p>` : `<h3>${format(countyValue, m)}</h3>`}
     <p>${when}</p>
     <button class="text-button" type="button" id="backToCountyProfile">${esc(t("backToProfile"))}</button>
     <button class="text-button" type="button" id="countyToState">${esc(t("viewStatewide"))}</button>
@@ -961,7 +1060,26 @@ function openCountyMeasure(county, mKey, when) {
   $("backToCountyProfile").addEventListener("click", () => openCountyProfile(county));
   $("countyToState").addEventListener("click", () => renderMeasurePage(mKey, when));
   setView("countyMeasure");
-  pushState({ view: "countyMeasure", county, measure: mKey, when });
+  pushState({ view: "countyMeasure", county, measure: mKey, when, breakdown: selectedBreakdown || "" });
+}
+
+function renderCountyStateMap(county, mKey, when, componentKey = null) {
+  const target = $("countyStateMap");
+  if (!componentKey) {
+    mapSvg({ target, mKey, when });
+    return;
+  }
+  target.innerHTML = `
+    <div class="breakdown-map-control">
+      <label for="countyBreakdownSelect">${esc(t("mapBreakdown"))}</label>
+      <select id="countyBreakdownSelect">
+        ${breakdownOptions(mKey).map((item) => `<option value="${esc(item.key)}" ${item.key === componentKey ? "selected" : ""}>${esc(item.label)}</option>`).join("")}
+      </select>
+    </div>
+    <div class="county-state-map-inner" id="countyStateMapInner"></div>
+  `;
+  mapSvg({ target: $("countyStateMapInner"), mKey, when, componentKey });
+  $("countyBreakdownSelect").addEventListener("change", (event) => openCountyMeasure(county, mKey, when, event.target.value));
 }
 
 function renderCountyVisualization(county, mKey, when) {
@@ -988,7 +1106,7 @@ function renderCountyYearControl(county, mKey, when, onChangeName) {
 
 function bindCountyYearControl(county, mKey) {
   $("trendChart").querySelectorAll("[data-cluster-when]").forEach((button) => {
-    button.addEventListener("click", () => openCountyMeasure(county, mKey, button.dataset.clusterWhen));
+    button.addEventListener("click", () => openCountyMeasure(county, mKey, button.dataset.clusterWhen, breakdownKey(mKey)));
   });
 }
 
@@ -1216,23 +1334,54 @@ function raceBars(profile) {
 
 function industryIcon(name) {
   const lower = String(name || "").toLowerCase();
-  let paths = '<path d="M34 18v32M24 28h20M26 50h16"></path>';
-  if (lower.includes("food") || lower.includes("drinking")) {
-    paths = '<path d="M24 18v18"></path><path d="M30 18v18"></path><path d="M24 28h6"></path><path d="M42 18v32"></path><path d="M38 18c8 8 8 18 0 24"></path>';
+  let category = "business";
+  let paths = '<rect x="22" y="24" width="28" height="26" rx="2"></rect><path d="M30 24v-6h12v6"></path><path d="M22 34h28"></path>';
+  if (lower.includes("food services") || lower.includes("drinking")) {
+    category = "food";
+    paths = '<path d="M23 18v18"></path><path d="M29 18v18"></path><path d="M23 28h6"></path><path d="M42 18v34"></path><path d="M38 18c8 8 8 18 0 25"></path>';
+  } else if (lower.includes("food manufacturing")) {
+    category = "manufacturing";
+    paths = '<path d="M17 51V31l10 6v-8l12 8v-8l14 8v14z"></path><path d="M25 51V39"></path><path d="M37 51V39"></path><path d="M49 51V39"></path><circle cx="26" cy="24" r="4"></circle>';
   } else if (lower.includes("education") || lower.includes("school")) {
-    paths = '<path d="M18 30l18-10 18 10-18 10z"></path><path d="M26 36v10c6 4 14 4 20 0V36"></path>';
-  } else if (lower.includes("health") || lower.includes("hospital")) {
-    paths = '<path d="M36 18v36"></path><path d="M20 36h32"></path><rect x="20" y="20" width="32" height="32" rx="3"></rect>';
-  } else if (lower.includes("manufactur") || lower.includes("wood")) {
-    paths = '<path d="M18 50V30l10 6v-8l12 8v-8l12 8v14z"></path><path d="M24 50V38"></path><path d="M36 50V38"></path><path d="M48 50V38"></path>';
-  } else if (lower.includes("construction")) {
-    paths = '<path d="M20 48h32"></path><path d="M24 48l8-24h8l8 24"></path><path d="M29 34h14"></path><path d="M26 42h20"></path>';
-  } else if (lower.includes("professional") || lower.includes("technical") || lower.includes("administrative")) {
-    paths = '<rect x="22" y="24" width="28" height="26" rx="2"></rect><path d="M30 24v-6h12v6"></path><path d="M22 34h28"></path>';
+    category = "education";
+    paths = '<path d="M17 30l19-10 19 10-19 10z"></path><path d="M26 36v10c6 4 14 4 20 0V36"></path><path d="M55 30v14"></path>';
+  } else if (lower.includes("hospital") || lower.includes("health") || lower.includes("nursing") || lower.includes("ambulatory")) {
+    category = "health";
+    paths = '<rect x="20" y="20" width="32" height="32" rx="4"></rect><path d="M36 27v18"></path><path d="M27 36h18"></path>';
+  } else if (lower.includes("social assistance")) {
+    category = "care";
+    paths = '<path d="M24 34c0-5 7-8 12-2 5-6 12-3 12 2 0 8-12 15-12 15S24 42 24 34z"></path><path d="M20 48c5 5 27 5 32 0"></path>';
+  } else if (lower.includes("wood") || lower.includes("manufactur") || lower.includes("electronic product") || lower.includes("computer")) {
+    category = "manufacturing";
+    paths = lower.includes("computer") || lower.includes("electronic")
+      ? '<rect x="20" y="22" width="32" height="22" rx="2"></rect><path d="M28 52h16"></path><path d="M36 44v8"></path><path d="M28 30h16"></path><path d="M28 36h10"></path>'
+      : '<path d="M17 51V31l10 6v-8l12 8v-8l14 8v14z"></path><path d="M25 51V39"></path><path d="M37 51V39"></path><path d="M49 51V39"></path>';
+  } else if (lower.includes("construction") || lower.includes("contractor") || lower.includes("civil engineering") || lower.includes("specialty trade")) {
+    category = "construction";
+    paths = '<path d="M19 50h34"></path><path d="M24 50l8-26h8l8 26"></path><path d="M29 34h14"></path><path d="M26 42h20"></path>';
+  } else if (lower.includes("crop") || lower.includes("animal production") || lower.includes("agriculture")) {
+    category = "agriculture";
+    paths = '<path d="M19 48c9-18 22-18 34 0"></path><path d="M36 49V25"></path><path d="M36 34c-8-1-12-5-14-13 8 0 13 4 14 13z"></path><path d="M36 39c7-1 11-5 13-11-7 0-11 4-13 11z"></path>';
+  } else if (lower.includes("forestry") || lower.includes("logging")) {
+    category = "forestry";
+    paths = '<path d="M36 17l-13 18h8L21 49h30L41 35h8z"></path><path d="M36 49v8"></path>';
+  } else if (lower.includes("government") || lower.includes("executive") || lower.includes("legislative") || lower.includes("environmental quality")) {
+    category = "government";
+    paths = '<path d="M18 30h36"></path><path d="M22 30l14-10 14 10"></path><path d="M24 30v19"></path><path d="M36 30v19"></path><path d="M48 30v19"></path><path d="M20 49h32"></path>';
+  } else if (lower.includes("justice") || lower.includes("public order") || lower.includes("safety")) {
+    category = "safety";
+    paths = '<path d="M36 18l16 6v11c0 10-7 17-16 21-9-4-16-11-16-21V24z"></path><path d="M30 37l4 4 9-10"></path>';
+  } else if (lower.includes("waste") || lower.includes("remediation")) {
+    category = "waste";
+    paths = '<path d="M25 28h22l-2 24H27z"></path><path d="M22 28h28"></path><path d="M30 28v-6h12v6"></path><path d="M31 36v9"></path><path d="M41 36v9"></path>';
+  } else if (lower.includes("accommodation")) {
+    category = "lodging";
+    paths = '<path d="M19 48V24"></path><path d="M53 48V33c0-4-3-7-7-7H31v22"></path><path d="M19 36h34"></path><path d="M23 32h8"></path><path d="M19 52h34"></path>';
   } else if (lower.includes("gasoline")) {
+    category = "fuel";
     paths = '<rect x="23" y="20" width="20" height="32" rx="2"></rect><path d="M28 28h10"></path><path d="M43 28l8 8v12c0 3-4 3-4 0V38"></path>';
   }
-  return `<svg viewBox="0 0 72 72" aria-hidden="true">${paths}</svg>`;
+  return `<svg class="industry-icon ${category}" viewBox="0 0 72 72" role="img" aria-label="${esc(name)}">${paths}</svg>`;
 }
 
 function industryIcons(profile) {
@@ -1356,7 +1505,7 @@ function restoreState(state) {
   if (!state?.view) return;
   suppressHistory = true;
   if (state.view === "countyProfile") openCountyProfile(state.county || currentCounty);
-  else if (state.view === "countyMeasure") openCountyMeasure(state.county || currentCounty, state.measure || currentMeasure, state.when || currentWhen);
+  else if (state.view === "countyMeasure") openCountyMeasure(state.county || currentCounty, state.measure || currentMeasure, state.when || currentWhen, state.breakdown || null);
   else if (state.view === "measure") renderMeasurePage(state.measure || currentMeasure, state.when || currentWhen);
   else setView(state.view);
   suppressHistory = false;
